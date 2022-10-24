@@ -557,10 +557,10 @@ class GaussianDiffusion(nn.Module):
         return pred_img, x_start
 
     @torch.no_grad()
-    def p_sample_loop(self, shape):
+    def p_sample_loop(self, shape, img = None):
         batch, device = shape[0], self.betas.device
 
-        img = torch.randn(shape, device=device)
+        img = torch.randn(shape, device=device) if img is None else img
 
         x_start = None
 
@@ -572,14 +572,14 @@ class GaussianDiffusion(nn.Module):
         return img
 
     @torch.no_grad()
-    def ddim_sample(self, shape, clip_denoised = True):
+    def ddim_sample(self, shape, img = None, clip_denoised = True):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
-        img = torch.randn(shape, device = device)
+        img = torch.randn(shape, device = device) if img is None else img
 
         x_start = None
 
@@ -608,10 +608,10 @@ class GaussianDiffusion(nn.Module):
         return img
 
     @torch.no_grad()
-    def sample(self, batch_size = 16):
+    def sample(self, img = None, batch_size = 16):
         image_size, channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn((batch_size, channels, image_size, image_size))
+        return sample_fn((batch_size, channels, image_size, image_size), img)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
