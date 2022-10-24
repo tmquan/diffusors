@@ -217,14 +217,14 @@ class DDMILightningModule(LightningModule):
             self.model_image,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='huber' # L1 or L2 or smooth L1
+            loss_type='L1' # L1 or L2 or smooth L1
         )
 
         self.diffusion_label = GaussianDiffusion(
             self.model_label,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='huber' # L1 or L2 or smooth L1
+            loss_type='L1' # L1 or L2 or smooth L1
         )
 
     def configure_optimizers(self):
