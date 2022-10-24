@@ -241,9 +241,9 @@ class DDMILightningModule(LightningModule):
 
         noise_u = torch.randn_like(unsup)
         t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        loss_image_u = self.diffusion_image.forward(unsup, t_u, noise_u)
+        loss_unsup_u = self.diffusion_image.forward(unsup, t_u, noise_u)
         
-        loss = loss_image_p + loss_label_p + loss_image_u
+        loss = loss_image_p + loss_label_p + loss_unsup_u
         info = {"loss": loss} 
 
         if batch_idx==0:
