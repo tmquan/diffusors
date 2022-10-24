@@ -217,14 +217,16 @@ class DDMILightningModule(LightningModule):
             self.model_image,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='L1' # L1 or L2 or smooth L1
+            loss_type='L1', # L1 or L2 or smooth L1, 
+            objective='pred_x0',
         )
 
         self.diffusion_label = GaussianDiffusion(
             self.model_label,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='L1' # L1 or L2 or smooth L1
+            loss_type='L1', # L1 or L2 or smooth L1
+            objective='pred_x0',
         )
 
     def configure_optimizers(self):
@@ -234,16 +236,24 @@ class DDMILightningModule(LightningModule):
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
 
-        noise_p = torch.randn_like(image)
-        t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        loss_image_p = self.diffusion_image.forward(image, t_p, noise_p)
-        loss_label_p = self.diffusion_label.forward(label, t_p, noise_p)
+        # noise_p = torch.randn_like(image)
+        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
+        # loss_image_p = self.diffusion_image.forward(image, t_p, noise_p)
+        # loss_label_p = self.diffusion_label.forward(label, t_p, noise_p)
 
-        noise_u = torch.randn_like(unsup)
-        t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        loss_unsup_u = self.diffusion_image.forward(unsup, t_u, noise_u)
+        # noise_u = torch.randn_like(unsup)
+        # t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
+        # loss_unsup_u = self.diffusion_image.forward(unsup, t_u, noise_u)
         
-        loss = loss_image_p + loss_label_p + loss_unsup_u
+        # loss = loss_image_p + loss_label_p + loss_unsup_u
+
+        noise = torch.randn_like(image)
+        t = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
+        loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
+                                                  torch.cat([t, t], dim=0), 
+                                                  torch.cat([noise, noise], dim=0))
+        loss_label = self.diffusion_label.forward(label, t, noise)        
+        loss = loss_image + loss_label                       
         info = {"loss": loss} 
 
         if batch_idx==0:
