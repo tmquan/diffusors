@@ -639,9 +639,9 @@ class GaussianDiffusion(nn.Module):
 
     @property
     def loss_fn(self):
-        if self.loss_type == 'l1':
+        if self.loss_type == 'L1':
             return F.l1_loss
-        elif self.loss_type == 'l2':
+        elif self.loss_type == 'L2':
             return F.mse_loss
         elif self.loss_type == 'huber':
             return F.smooth_l1_loss
