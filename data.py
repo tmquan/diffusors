@@ -64,7 +64,10 @@ class CustomDataModule(LightningDataModule):
         val_image2d_folders: str = "path/to/folder", 
         test_image2d_folders: str = "path/to/dir", 
         shape: int = 256,
-        batch_size: int = 32
+        batch_size: int = 32, 
+        train_samples: int = 4000,
+        val_samples: int = 800,
+        test_samples: int = 800,
     ):
         super().__init__()
 
@@ -74,6 +77,9 @@ class CustomDataModule(LightningDataModule):
         self.train_image2d_folders = train_image2d_folders
         self.val_image2d_folders = val_image2d_folders
         self.test_image2d_folders = test_image2d_folders
+        self.train_samples = train_samples
+        self.val_samples = val_samples
+        self.test_samples = test_samples
 
         # self.setup()
         def glob_files(folders: str=None, extension: str='*.nii.gz'):
@@ -101,7 +107,6 @@ class CustomDataModule(LightningDataModule):
                 AddChanneld(keys=["image2d"],),
                 ScaleIntensityd(keys=["image2d"], minv=0.0, maxv=1.0,),
                 RandZoomd(keys=["image2d"], prob=1.0, min_zoom=0.9, max_zoom=1.0, padding_mode='constant', mode=["area"]), 
-                RandFlipd(keys=["image2d"], prob=0.5, spatial_axis=1),
                 Resized(keys=["image2d"], spatial_size=256, size_mode="longest", mode=["area"]),
                 DivisiblePadd(keys=["image2d"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image2d"],),
@@ -110,9 +115,9 @@ class CustomDataModule(LightningDataModule):
 
         self.train_datasets = UnpairedDataset(
             keys=["image2d"],
-            data=[self.train_image3d_files, self.train_image2d_files], 
+            data=[self.train_image2d_files], 
             transform=self.train_transforms,
-            length=1000,
+            length=self.train_samples,
             batch_size=self.batch_size,
         )
 
@@ -139,9 +144,9 @@ class CustomDataModule(LightningDataModule):
 
         self.val_datasets = UnpairedDataset(
             keys=["image2d"],
-            data=[self.val_image3d_files, self.val_image2d_files], 
+            data=[self.val_image2d_files], 
             transform=self.val_transforms,
-            length=200,
+            length=self.val_samples,
             batch_size=self.batch_size,
         )
         

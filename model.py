@@ -23,7 +23,7 @@ from PIL import Image
 from tqdm.auto import tqdm
 from ema_pytorch import EMA
 
-from accelerate import Accelerator
+# from accelerate import Accelerator
 
 # constants
 
