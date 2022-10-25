@@ -140,6 +140,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
                 RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.0, padding_mode='constant', mode=["area", "area", "area"]), 
                 Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
@@ -170,6 +171,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
                 Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
@@ -318,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument("--logsdir", type=str, default='logs', help="logging directory")
     parser.add_argument("--datadir", type=str, default='data', help="data directory")
     
-    parser.add_argument("--epochs", type=int, default=501, help="number of epochs")
+    parser.add_argument("--epochs", type=int, default=101, help="number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="adam: learning rate")
     parser.add_argument("--ckpt", type=str, default=None, help="path to checkpoint")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
@@ -330,40 +332,37 @@ if __name__ == "__main__":
     # Create data module
     
     train_image_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/images/'),
-        # os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/train/images/'), 
-        # os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/test/images/'), 
-        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
-        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
     train_label_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/labels/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
+        
     ]
 
     train_unsup_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/train/images/'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
     ]
 
     val_image_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/images/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
     ]
 
     val_label_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/labels/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
     ]
 
     val_unsup_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/test/images/'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
     test_image_dirs = val_image_dirs
     test_label_dirs = val_label_dirs

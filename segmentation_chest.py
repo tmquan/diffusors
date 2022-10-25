@@ -318,7 +318,7 @@ if __name__ == "__main__":
     parser.add_argument("--logsdir", type=str, default='logs', help="logging directory")
     parser.add_argument("--datadir", type=str, default='data', help="data directory")
     
-    parser.add_argument("--epochs", type=int, default=501, help="number of epochs")
+    parser.add_argument("--epochs", type=int, default=101, help="number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="adam: learning rate")
     parser.add_argument("--ckpt", type=str, default=None, help="path to checkpoint")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
