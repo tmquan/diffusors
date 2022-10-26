@@ -310,7 +310,7 @@ class DDMILightningModule(LightningModule):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--timesteps", type=int, default=1000, help="timesteps")
+    parser.add_argument("--timesteps", type=int, default=100, help="timesteps")
     parser.add_argument("--batch_size", type=int, default=16, help="batch size")
     parser.add_argument("--shape", type=int, default=256, help="spatial size of the tensor")
     parser.add_argument("--train_samples", type=int, default=4000, help="training samples")
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument("--logsdir", type=str, default='logs', help="logging directory")
     parser.add_argument("--datadir", type=str, default='data', help="data directory")
     
-    parser.add_argument("--epochs", type=int, default=101, help="number of epochs")
+    parser.add_argument("--epochs", type=int, default=301, help="number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="adam: learning rate")
     parser.add_argument("--ckpt", type=str, default=None, help="path to checkpoint")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
