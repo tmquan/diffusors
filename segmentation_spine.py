@@ -240,8 +240,13 @@ class DDMMLightningModule(LightningModule):
         )
 
     def configure_optimizers(self):
-        optimizer = torch.optim.RAdam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        return optimizer
+        optimizers = [
+            torch.optim.RAdam([
+                {'params': self.model_image.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
+            torch.optim.RAdam([
+                {'params': self.model_label.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
+        ]
+        return optimizers, []
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
@@ -267,9 +272,9 @@ class DDMMLightningModule(LightningModule):
                                                   torch.cat([noise_p, noise_u], dim=0))
         loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
                                                   torch.cat([t_p, t_p], dim=0), 
-                                                  torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)      
-        loss = loss_image + loss_label                       
-        info = {"loss": loss} 
+                                                  torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)        
+        # loss = loss_image + loss_label                       
+        # info = {"loss": loss} 
 
         if batch_idx==0:
             noise_samples = torch.randn_like(unsup)
@@ -279,7 +284,11 @@ class DDMMLightningModule(LightningModule):
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.current_epoch*self.batch_size + batch_idx)
-        info = {"loss": loss}
+        # info = {"loss": loss}
+        if optimizer_idx==0: # forward picture
+            info = {f'loss': loss_image} 
+        if optimizer_idx==1: # forward density
+            info = {f'loss': loss_label}
         return info
 
         # noise = torch.randn_like(image2d)
@@ -294,7 +303,7 @@ class DDMMLightningModule(LightningModule):
         # info = {"loss": loss}
         # return info
 
-    def training_step(self, batch, batch_idx, optimizer_idx=0):
+    def training_step(self, batch, batch_idx, optimizer_idx):
         return self._common_step(batch, batch_idx, optimizer_idx, stage='train')
 
     def validation_step(self, batch, batch_idx):
