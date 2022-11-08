@@ -209,20 +209,20 @@ class DDMMLightningModule(LightningModule):
         self.weight_decay = hparams.weight_decay
         self.num_timesteps = hparams.timesteps
         self.batch_size = hparams.batch_size
-        self.model_image = Unet(
+        model_image = Unet(
             dim=64,
             dim_mults=(1, 2, 4, 8),
             channels=1,
         )
 
-        self.model_label = Unet(
+        model_label = Unet(
             dim=64,
             dim_mults=(1, 2, 4, 8),
             channels=1,
         )
 
         self.diffusion_image = GaussianDiffusion(
-            self.model_image,
+            model_image,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
             loss_type='L1', # L1 or L2 or smooth L1, 
@@ -230,7 +230,7 @@ class DDMMLightningModule(LightningModule):
         )
 
         self.diffusion_label = GaussianDiffusion(
-            self.model_label,
+            model_label,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
             loss_type='dice', # L1 or L2 or smooth L1
@@ -238,13 +238,14 @@ class DDMMLightningModule(LightningModule):
         )
 
     def configure_optimizers(self):
-        optimizers = [
-            torch.optim.RAdam([
-                {'params': self.model_image.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
-            torch.optim.RAdam([
-                {'params': self.model_label.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
-        ]
-        return optimizers, []
+        return torch.optim.RAdam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        # optimizers = [
+        #     torch.optim.RAdam([
+        #         {'params': self.diffusion_image.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
+        #     torch.optim.RAdam([
+        #         {'params': self.diffusion_label.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
+        # ]
+        # return optimizers, []
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
@@ -271,9 +272,8 @@ class DDMMLightningModule(LightningModule):
         loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
                                                   torch.cat([t_p, t_p], dim=0), 
                                                   torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)        
-        # loss = loss_image + loss_label                       
-        # info = {"loss": loss} 
-
+        loss = loss_image + loss_label                       
+        
         if batch_idx==0:
             noise_samples = torch.randn_like(unsup)
             image_samples = self.diffusion_image.sample(batch_size=self.batch_size, img=noise_samples)
@@ -282,11 +282,12 @@ class DDMMLightningModule(LightningModule):
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.current_epoch*self.batch_size + batch_idx)
-        # info = {"loss": loss}
-        if optimizer_idx==0: # forward picture
-            info = {f'loss': loss_image} 
-        if optimizer_idx==1: # forward density
-            info = {f'loss': loss_label}
+        
+        info = {"loss": loss}
+        # if optimizer_idx==0: # forward picture
+        #     info = {f'loss': loss_image} 
+        # if optimizer_idx==1: # forward density
+        #     info = {f'loss': loss_label}
         return info
 
         # noise = torch.randn_like(image2d)
@@ -302,7 +303,7 @@ class DDMMLightningModule(LightningModule):
         # return info
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        return self._common_step(batch, batch_idx, optimizer_idx, stage='train')
+        return self._common_step(batch, batch_idx, optimizer_idx=0, stage='train')
 
     def validation_step(self, batch, batch_idx):
         return self._common_step(batch, batch_idx, optimizer_idx=0, stage='validation')
