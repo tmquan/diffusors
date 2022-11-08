@@ -286,10 +286,10 @@ class DDMMLightningModule(LightningModule):
         return self._common_step(batch, batch_idx, optimizer_idx, stage='train')
 
     def validation_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, optimizer_idx=0, stage='validation')
+        return self._common_step(batch, batch_idx, optimizer_idx=-1, stage='validation')
 
     def test_step(self, batch, batch_idx):
-        return self._common_step(batch, batch_idx, optimizer_idx=0, stage='test')
+        return self._common_step(batch, batch_idx, optimizer_idx=-1, stage='test')
 
     def _common_epoch_end(self, outputs, stage: Optional[str]='common'):
         loss = torch.stack([x[f'loss'] for x in outputs]).mean()
