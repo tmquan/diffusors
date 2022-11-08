@@ -22,13 +22,19 @@ from monai.data import list_data_collate, decollate_batch
 from monai.utils import first, set_determinism, get_seed, MAX_SEED
 from monai.transforms import (
     apply_transform, 
+    Randomizable,
     AddChanneld,
-    Compose, OneOf, 
-    LoadImaged, Spacingd, Lambdad,
-    Orientationd, DivisiblePadd, 
-    RandFlipd, RandZoomd, RandScaleCropd, CropForegroundd,
-    RandAffined,
-    Resized, Rotate90d, 
+    Compose, 
+    OneOf, 
+    LoadImaged, 
+    Spacingd,
+    Orientationd, 
+    DivisiblePadd, 
+    RandFlipd, 
+    RandZoomd, 
+    RandScaleCropd, 
+    CropForegroundd,
+    Resized, Rotate90d, HistogramNormalized,
     ScaleIntensityd,
     ScaleIntensityRanged, 
     ToTensord,
@@ -140,10 +146,11 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
                 ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
                 RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.0, padding_mode='constant', mode=["area", "area", "area"]), 
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
+                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image", "label", "unsup"],),
             ]
@@ -171,9 +178,10 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
                 ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
+                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image", "label", "unsup"],),
             ]
@@ -265,7 +273,7 @@ class DDMILightningModule(LightningModule):
             noise_samples = torch.randn_like(unsup)
             image_samples = self.diffusion_image.sample(batch_size=self.batch_size, img=noise_samples)
             label_samples = self.diffusion_label.sample(batch_size=self.batch_size, img=noise_samples)
-            viz2d = torch.cat([image, label, image_samples, label_samples], dim=-2)
+            viz2d = torch.cat([image, label, image_samples, label_samples], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.current_epoch*self.batch_size + batch_idx)
