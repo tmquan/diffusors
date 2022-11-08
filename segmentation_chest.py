@@ -263,7 +263,9 @@ class DDMILightningModule(LightningModule):
         loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
                                                   torch.cat([t_p, t_u], dim=0), 
                                                   torch.cat([noise_p, noise_u], dim=0))
-        loss_label = self.diffusion_label.forward(label, t_p, noise_p)        
+        loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
+                                                  torch.cat([t_p, t_p], dim=0), 
+                                                  torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)        
         loss = loss_image + loss_label                       
         info = {"loss": loss} 
 
