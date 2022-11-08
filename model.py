@@ -16,7 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 from torchvision import transforms as T, utils
 
-import kornia
+from monai.losses import DiceLoss
 
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
@@ -466,22 +466,10 @@ def dice_loss(input: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> t
     if not input.device == target.device:
         raise ValueError(f"input and target must be in the same device. Got: {input.device} and {target.device}")
 
-    # # compute softmax over the classes axis
-    # input_soft: torch.Tensor = F.softmax(input, dim=1)
     input_unnorm = unnormalize_to_zero_to_one(input)
 
-    # # create the labels one hot tensor
-    # target_one_hot: torch.Tensor = one_hot(target, num_classes=input.shape[1], device=input.device, dtype=input.dtype)
     target_unnorm = unnormalize_to_zero_to_one(target)
-    
-    # compute the actual dice score
-    dims = (1, 2, 3)
-    intersection = torch.sum(input_unnorm * target_unnorm, dims)
-    cardinality = torch.sum(input_unnorm + target_unnorm, dims)
-
-    dice_score = 2.0 * intersection / (cardinality + eps)
-
-    return torch.mean(-dice_score + 1.0)
+    return DiceLoss()(input_unnorm, target_unnorm)
 
 
 class GaussianDiffusion(nn.Module):
