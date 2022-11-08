@@ -16,6 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 from torchvision import transforms as T, utils
 
+import kornia
+
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
 
@@ -414,6 +416,74 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+def dice_loss(input: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    r"""Criterion that computes Sørensen-Dice Coefficient loss.
+
+    According to [1], we compute the Sørensen-Dice Coefficient as follows:
+
+    .. math::
+
+        \text{Dice}(x, class) = \frac{2 |X \cap Y|}{|X| + |Y|}
+
+    Where:
+       - :math:`X` expects to be the scores of each class.
+       - :math:`Y` expects to be the one-hot tensor with the class labels.
+
+    the loss, is finally computed as:
+
+    .. math::
+
+        \text{loss}(x, class) = 1 - \text{Dice}(x, class)
+
+    Reference:
+        [1] https://en.wikipedia.org/wiki/S%C3%B8rensen%E2%80%93Dice_coefficient
+
+    Args:
+        input: logits tensor with shape :math:`(N, C, H, W)` where C = number of classes.
+        labels: labels tensor with shape :math:`(N, H, W)` where each value
+          is :math:`0 ≤ targets[i] ≤ C−1`.
+        eps: Scalar to enforce numerical stabiliy.
+
+    Return:
+        the computed loss.
+
+    Example:
+        >>> N = 5  # num_classes
+        >>> input = torch.randn(1, N, 3, 5, requires_grad=True)
+        >>> target = torch.empty(1, 3, 5, dtype=torch.long).random_(N)
+        >>> output = dice_loss(input, target)
+        >>> output.backward()
+    """
+    if not isinstance(input, torch.Tensor):
+        raise TypeError(f"Input type is not a torch.Tensor. Got {type(input)}")
+
+    if not len(input.shape) == 4:
+        raise ValueError(f"Invalid input shape, we expect BxNxHxW. Got: {input.shape}")
+
+    if not input.shape[-2:] == target.shape[-2:]:
+        raise ValueError(f"input and target shapes must be the same. Got: {input.shape} and {target.shape}")
+
+    if not input.device == target.device:
+        raise ValueError(f"input and target must be in the same device. Got: {input.device} and {target.device}")
+
+    # # compute softmax over the classes axis
+    # input_soft: torch.Tensor = F.softmax(input, dim=1)
+    input_unnorm = unnormalize_to_zero_to_one(input)
+
+    # # create the labels one hot tensor
+    # target_one_hot: torch.Tensor = one_hot(target, num_classes=input.shape[1], device=input.device, dtype=input.dtype)
+    target_unnorm = unnormalize_to_zero_to_one(target)
+    
+    # compute the actual dice score
+    dims = (1, 2, 3)
+    intersection = torch.sum(input_unnorm * target_unnorm, dims)
+    cardinality = torch.sum(input_unnorm + target_unnorm, dims)
+
+    dice_score = 2.0 * intersection / (cardinality + eps)
+
+    return torch.mean(-dice_score + 1.0)
+
+
 class GaussianDiffusion(nn.Module):
     def __init__(
         self,
@@ -645,6 +715,8 @@ class GaussianDiffusion(nn.Module):
             return F.mse_loss
         elif self.loss_type == 'huber':
             return F.smooth_l1_loss
+        elif self.loss_type == 'dice':
+            return dice_loss
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
 
@@ -677,8 +749,9 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown objective {self.objective}')
 
-        loss = self.loss_fn(model_out, target, reduction = 'none')
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        # loss = self.loss_fn(model_out, target, reduction = 'none')
+        # loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        loss = self.loss_fn(model_out, target)
 
         loss = loss * extract(self.p2_loss_weight, t, loss.shape)
         return loss.mean()

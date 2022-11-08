@@ -204,7 +204,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         )
         return self.val_loader
 
-class DDMILightningModule(LightningModule):
+class DDMMLightningModule(LightningModule):
     def __init__(self, hparams, *kwargs) -> None:
         super().__init__()
         self.lr = hparams.lr
@@ -235,7 +235,7 @@ class DDMILightningModule(LightningModule):
             self.model_label,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='L1', # L1 or L2 or smooth L1
+            loss_type='dice', # L1 or L2 or smooth L1
             objective='pred_x0',
         )
 
@@ -408,7 +408,7 @@ if __name__ == "__main__":
     # test_random_uniform_cameras(hparams, datamodule)
     #############################################
 
-    model = DDMILightningModule(
+    model = DDMMLightningModule(
         hparams = hparams
     )
     model = model.load_from_checkpoint(hparams.ckpt, strict=False) if hparams.ckpt is not None else model
