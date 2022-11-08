@@ -235,7 +235,7 @@ class DDMMLightningModule(LightningModule):
             model_label,
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
-            loss_type='dice', # L1 or L2 or smooth L1
+            loss_type='L1', # L1 or L2 or smooth L1
             objective='pred_x0',
         )
 
@@ -276,8 +276,10 @@ class DDMMLightningModule(LightningModule):
         
         if optimizer_idx==0: # forward picture
             info = {f'loss': loss_image} 
-        if optimizer_idx==1: # forward density
+        elif optimizer_idx==1: # forward density
             info = {f'loss': loss_label}
+        else:
+            info = {f'loss': loss_image + loss_label }
         return info
 
     def training_step(self, batch, batch_idx, optimizer_idx):
