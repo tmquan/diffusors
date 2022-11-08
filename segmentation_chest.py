@@ -147,6 +147,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
                 HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
+                CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
                 RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.1, padding_mode='constant', mode=["area", "nearest", "area"]), 
                 Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
@@ -166,7 +167,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         self.train_loader = DataLoader(
             self.train_datasets, 
             batch_size=self.batch_size, 
-            num_workers=8, 
+            num_workers=16, 
             collate_fn=list_data_collate,
             shuffle=True,
         )
@@ -178,6 +179,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
                 HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
+                CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
                 Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
@@ -196,7 +198,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         self.val_loader = DataLoader(
             self.val_datasets, 
             batch_size=self.batch_size, 
-            num_workers=4, 
+            num_workers=8, 
             collate_fn=list_data_collate,
             shuffle=True,
         )
@@ -257,9 +259,12 @@ class DDMMLightningModule(LightningModule):
         loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
                                                   torch.cat([t_p, t_u], dim=0), 
                                                   torch.cat([noise_p, noise_u], dim=0))
-        loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
-                                                  torch.cat([t_p, t_p], dim=0), 
-                                                  torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)        
+        # loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
+        #                                           torch.cat([t_p, t_p], dim=0), 
+        #                                           torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)     
+        loss_label = self.diffusion_label.forward(label, 
+                                                  t_p, 
+                                                  noise_p)   
         if batch_idx==0:
             noise_samples = torch.randn_like(unsup)
             image_samples = self.diffusion_image.sample(batch_size=self.batch_size, img=noise_samples)
