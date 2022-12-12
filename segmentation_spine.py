@@ -212,6 +212,7 @@ class DDMMLightningModule(LightningModule):
     def __init__(self, hparams, *kwargs) -> None:
         super().__init__()
         self.lr = hparams.lr
+        self.epochs = hparams.epochs
         self.weight_decay = hparams.weight_decay
         self.num_timesteps = hparams.timesteps
         self.batch_size = hparams.batch_size
@@ -240,7 +241,7 @@ class DDMMLightningModule(LightningModule):
             image_size=hparams.shape,
             timesteps=hparams.timesteps,   # number of steps
             loss_type='L1', # L1 or L2 or smooth L1
-            objective='pred_x0',
+            objective='pred_noise',
         )
 
     def configure_optimizers(self):
@@ -251,7 +252,12 @@ class DDMMLightningModule(LightningModule):
             torch.optim.RAdam([
                 {'params': self.diffusion_label.parameters()}], lr=1e0*(self.lr or self.learning_rate)), \
         ]
-        return optimizers, []
+        schedulers = [
+            torch.optim.lr_scheduler.LinearLR(optimizers[0], start_factor=1.0, end_factor=.01, total_iters=self.epochs),
+            torch.optim.lr_scheduler.LinearLR(optimizers[1], start_factor=1.0, end_factor=.01, total_iters=self.epochs)
+        ]
+        
+        return optimizers, schedulers
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]

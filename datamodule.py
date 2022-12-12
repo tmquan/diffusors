@@ -11,8 +11,8 @@ from monai.data import Dataset, DataLoader
 from monai.data import list_data_collate, decollate_batch
 from monai.utils import first, set_determinism, get_seed, MAX_SEED
 from monai.transforms import (
-    apply_transform, 
-    AddChanneld,
+    # apply_transform, ensure_channel_first=True, 
+    # AddChanneld,
     Compose, 
     OneOf, 
     HistogramNormalized,
@@ -112,8 +112,8 @@ class CustomDataModule(LightningDataModule):
     def train_dataloader(self):
         self.train_transforms = Compose(
             [
-                LoadImaged(keys=["image2d"]),
-                AddChanneld(keys=["image2d"],),
+                LoadImaged(keys=["image2d"], ensure_channel_first=True),
+                # AddChanneld(keys=["image2d"],),
                 ScaleIntensityd(keys=["image2d"], minv=0.0, maxv=1.0,),
                 RandZoomd(keys=["image2d"], prob=1.0, min_zoom=0.9, max_zoom=1.0, padding_mode='constant', mode=["area"]), 
                 Resized(keys=["image2d"], spatial_size=256, size_mode="longest", mode=["area"]),
@@ -142,8 +142,8 @@ class CustomDataModule(LightningDataModule):
     def val_dataloader(self):
         self.val_transforms = Compose(
             [
-                LoadImaged(keys=["image2d"]),
-                AddChanneld(keys=["image2d"],),
+                LoadImaged(keys=["image2d"], ensure_channel_first=True),
+                # AddChanneld(keys=["image2d"],),
                 ScaleIntensityd(keys=["image2d"], minv=0.0, maxv=1.0,), 
                 HistogramNormalized(keys=["image2d"], min=0.0, max=1.0,),
                 Resized(keys=["image2d"], spatial_size=256, size_mode="longest", mode=["area"]),

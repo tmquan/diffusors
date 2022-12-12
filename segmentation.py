@@ -22,19 +22,26 @@ from monai.data import list_data_collate, decollate_batch
 from monai.utils import first, set_determinism, get_seed, MAX_SEED
 from monai.transforms import (
     apply_transform, 
+    Randomizable,
     AddChanneld,
-    Compose, OneOf, 
-    LoadImaged, Spacingd, Lambdad,
-    Orientationd, DivisiblePadd, 
-    RandFlipd, RandZoomd, RandScaleCropd, CropForegroundd,
+    Compose, 
+    OneOf, 
+    LoadImaged, 
+    Spacingd,
+    Orientationd, 
+    DivisiblePadd, 
+    RandFlipd, 
+    RandZoomd, 
     RandAffined,
-    Resized, Rotate90d, 
+    RandScaleCropd, 
+    CropForegroundd,
+    Resized, Rotate90d, HistogramNormalized,
     ScaleIntensityd,
     ScaleIntensityRanged, 
     ToTensord,
 )
 # from data import CustomDataModule
-from model import *
+from cdiff import *
 
 class PairedAndUnsupervisedDataset(monai.data.Dataset, monai.transforms.Randomizable):
     def __init__(
@@ -140,9 +147,14 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
+                CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
+                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
-                RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.0, padding_mode='constant', mode=["area", "area", "area"]), 
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
+                # RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.1, padding_mode='constant', mode=["area", "nearest", "area"]), 
+                RandFlipd(keys=["image", "label", "unsup"], prob=0.5, spatial_axis=0),
+                RandAffined(keys=["image", "label", "unsup"], prob=1.0, rotate_range=0.1, translate_range=10, scale_range=0.1, padding_mode='zeros', mode=["bilinear", "nearest", "bilinear"]), 
+                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image", "label", "unsup"],),
             ]
@@ -159,7 +171,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         self.train_loader = DataLoader(
             self.train_datasets, 
             batch_size=self.batch_size, 
-            num_workers=8, 
+            num_workers=16, 
             collate_fn=list_data_collate,
             shuffle=True,
         )
@@ -170,8 +182,11 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             [
                 LoadImaged(keys=["image", "label", "unsup"]),
                 AddChanneld(keys=["image", "label", "unsup"],),
+                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
+                CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
+                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
                 ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "area", "area"]),
+                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image", "label", "unsup"],),
             ]
@@ -188,102 +203,96 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         self.val_loader = DataLoader(
             self.val_datasets, 
             batch_size=self.batch_size, 
-            num_workers=4, 
+            num_workers=8, 
             collate_fn=list_data_collate,
             shuffle=True,
         )
         return self.val_loader
 
-class DDMILightningModule(LightningModule):
+class DDMMLightningModule(LightningModule):
     def __init__(self, hparams, *kwargs) -> None:
         super().__init__()
         self.lr = hparams.lr
+        self.epochs = hparams.epochs
         self.weight_decay = hparams.weight_decay
         self.num_timesteps = hparams.timesteps
         self.batch_size = hparams.batch_size
-        self.model_image = Unet(
-            dim=64,
-            dim_mults=(1, 2, 4, 8),
-            channels=1,
+        self.shape = hparams.shape
+        self.num_classes = 2
+        self.timesteps = hparams.timesteps
+        model = Unet(
+            dim = 64,
+            dim_mults = (1, 2, 4, 8),
+            num_classes = self.num_classes,
+            cond_drop_prob = 0.5, 
+            channels = 1,
+        )
+        self.diffusion = GaussianDiffusion(
+            model,
+            image_size = self.shape,
+            timesteps = self.timesteps
         )
 
-        self.model_label = Unet(
-            dim=64,
-            dim_mults=(1, 2, 4, 8),
-            channels=1,
-        )
-
-        self.diffusion_image = GaussianDiffusion(
-            self.model_image,
-            image_size=hparams.shape,
-            timesteps=hparams.timesteps,   # number of steps
-            loss_type='L1', # L1 or L2 or smooth L1, 
-            objective='pred_x0',
-        )
-
-        self.diffusion_label = GaussianDiffusion(
-            self.model_label,
-            image_size=hparams.shape,
-            timesteps=hparams.timesteps,   # number of steps
-            loss_type='L1', # L1 or L2 or smooth L1
-            objective='pred_x0',
-        )
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.RAdam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        return optimizer
+        self.save_hyperparameters()
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
+        _device = image.device
+        batches = image.shape[0]
 
         # noise_p = torch.randn_like(image)
-        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss_image_p = self.diffusion_image.forward(image, t_p, noise_p)
-        # loss_label_p = self.diffusion_label.forward(label, t_p, noise_p)
-
         # noise_u = torch.randn_like(unsup)
+        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
         # t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss_unsup_u = self.diffusion_image.forward(unsup, t_u, noise_u)
-        
-        # loss = loss_image_p + loss_label_p + loss_unsup_u
+        # loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
+        #                                           torch.cat([t_p, t_u], dim=0), 
+        #                                           torch.cat([noise_p, noise_u], dim=0))
+        # # loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
+        # #                                           torch.cat([t_p, t_p], dim=0), 
+        # #                                           torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)     
+        # loss_label = self.diffusion_label.forward(label, 
+        #                                           t_p, 
+        #                                           noise_p)      
 
-        # noise = torch.randn_like(image)
         noise_p = torch.randn_like(image)
         noise_u = torch.randn_like(unsup)
-        t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
-                                                  torch.cat([t_p, t_u], dim=0), 
-                                                  torch.cat([noise_p, noise_u], dim=0))
-        loss_label = self.diffusion_label.forward(label, t_p, noise_p)        
-        loss = loss_image + loss_label                       
-        info = {"loss": loss} 
+        
+        gamma_p = torch.rand(batches).to(_device) #.view(batches, 1, 1, 1).repeat(1, 1, self.shape, self.shape)
+        image_p = torch.zeros_like(gamma_p)
+        unsup_u = torch.zeros_like(gamma_p)
+        label_p = torch.ones_like(gamma_p)
+        
+        # 1st pass, supervised
+        loss_super = self.diffusion.forward(torch.cat([image, label], dim=0), 
+                                            classes = torch.cat([image_p.long(), label_p.long()], dim=0), 
+                                            noise = torch.cat([noise_p, noise_p], dim=0)
+                                            )
+        # 1st pass, unsupervised
+        loss_unsup = self.diffusion.forward(unsup, 
+                                            classes = unsup_u.long(), 
+                                            noise = noise_u
+                                            )
 
-        if batch_idx==0:
+        self.log(f'{stage}_loss_super', loss_super, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        self.log(f'{stage}_loss_unsup', loss_unsup, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        
+        loss = loss_super + loss_unsup
+        
+
+        if batch_idx % 10 == 0:
             noise_samples = torch.randn_like(unsup)
-            image_samples = self.diffusion_image.sample(batch_size=self.batch_size, img=noise_samples)
-            label_samples = self.diffusion_label.sample(batch_size=self.batch_size, img=noise_samples)
-            viz2d = torch.cat([image, label, image_samples, label_samples], dim=-2)
+            image_samples = self.diffusion.sample(classes=image_p.long(), noise = noise_samples)
+            label_samples = self.diffusion.sample(classes=label_p.long(), noise = noise_samples)
+            viz2d = torch.cat([unsup, image, label, image_samples, label_samples], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
-            tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.current_epoch*self.batch_size + batch_idx)
-        info = {"loss": loss}
+            tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)
+        
+        info = {f'loss': loss} 
         return info
 
-        # noise = torch.randn_like(image2d)
-        # t = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss = self.diffusion.forward(image2d, t, noise)
-        # if batch_idx==0:
-        #     samples = self.diffusion.sample(batch_size=self.batch_size)
-        #     viz2d = torch.cat([image2d, samples], dim=-2)
-        #     grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
-        #     tensorboard = self.logger.experiment
-        #     tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.current_epoch*self.batch_size + batch_idx)
-        # info = {"loss": loss}
-        # return info
-
-    def training_step(self, batch, batch_idx, optimizer_idx=0):
-        return self._common_step(batch, batch_idx, optimizer_idx, stage='train')
+    def training_step(self, batch, batch_idx):
+        return self._common_step(batch, batch_idx, optimizer_idx=0, stage='train')
 
     def validation_step(self, batch, batch_idx):
         return self._common_step(batch, batch_idx, optimizer_idx=0, stage='validation')
@@ -291,7 +300,7 @@ class DDMILightningModule(LightningModule):
     def test_step(self, batch, batch_idx):
         return self._common_step(batch, batch_idx, optimizer_idx=0, stage='test')
 
-    def _common_epoch_end(self, outputs, stage: Optional[str]='common'):
+    def _common_epoch_end(self, outputs, stage: Optional[str] = 'common'):
         loss = torch.stack([x[f'loss'] for x in outputs]).mean()
         self.log(f'{stage}_loss_epoch', loss, on_step=False, prog_bar=True, logger=True, sync_dist=True)
 
@@ -300,25 +309,30 @@ class DDMILightningModule(LightningModule):
 
     def validation_epoch_end(self, outputs):
         return self._common_epoch_end(outputs, stage='validation')
-    
+
     def test_epoch_end(self, outputs):
         return self._common_epoch_end(outputs, stage='test')
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.RAdam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 20], gamma=0.1)
+        return [optimizer], [scheduler]
 
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--timesteps", type=int, default=1000, help="timesteps")
-    parser.add_argument("--batch_size", type=int, default=16, help="batch size")
+    parser.add_argument("--timesteps", type=int, default=100, help="timesteps")
+    parser.add_argument("--batch_size", type=int, default=8, help="batch size")
     parser.add_argument("--shape", type=int, default=256, help="spatial size of the tensor")
-    parser.add_argument("--train_samples", type=int, default=4000, help="training samples")
-    parser.add_argument("--val_samples", type=int, default=800, help="validation samples")
-    parser.add_argument("--test_samples", type=int, default=400, help="test samples")
+    parser.add_argument("--train_samples", type=int, default=40000, help="training samples")
+    parser.add_argument("--val_samples", type=int, default=8000, help="validation samples")
+    parser.add_argument("--test_samples", type=int, default=4000, help="test samples")
     
     parser.add_argument("--logsdir", type=str, default='logs', help="logging directory")
     parser.add_argument("--datadir", type=str, default='data', help="data directory")
     
-    parser.add_argument("--epochs", type=int, default=501, help="number of epochs")
+    parser.add_argument("--epochs", type=int, default=31, help="number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="adam: learning rate")
     parser.add_argument("--ckpt", type=str, default=None, help="path to checkpoint")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
@@ -330,40 +344,37 @@ if __name__ == "__main__":
     # Create data module
     
     train_image_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/images/'),
-        # os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/train/images/'), 
-        # os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/test/images/'), 
-        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
-        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
     train_label_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/labels/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
+        
     ]
 
     train_unsup_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/train/images/'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
     ]
 
     val_image_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/images/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/images/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
     ]
 
     val_label_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/JSRT/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/ChinaSet/processed/labels/'), 
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/Montgomery/processed/labels/'),
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
     ]
 
     val_unsup_dirs = [
-        os.path.join(hparams.datadir, 'ChestXRLungSegmentation/VinDr/v1/processed/test/images/'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
     test_image_dirs = val_image_dirs
     test_label_dirs = val_label_dirs
@@ -399,7 +410,7 @@ if __name__ == "__main__":
     # test_random_uniform_cameras(hparams, datamodule)
     #############################################
 
-    model = DDMILightningModule(
+    model = DDMMLightningModule(
         hparams = hparams
     )
     model = model.load_from_checkpoint(hparams.ckpt, strict=False) if hparams.ckpt is not None else model
@@ -413,7 +424,7 @@ if __name__ == "__main__":
         filename='{epoch:02d}-{validation_loss_epoch:.2f}',
         save_top_k=-1,
         save_last=True,
-        every_n_epochs=5, 
+        every_n_epochs=1, 
     )
     lr_callback = LearningRateMonitor(logging_interval='step')
     # Logger
@@ -429,8 +440,9 @@ if __name__ == "__main__":
             checkpoint_callback, 
         ],
         # accumulate_grad_batches=4, 
-        strategy="fsdp", #"fsdp", #"ddp_sharded", #"horovod", #"deepspeed", #"ddp_sharded",
-        precision=16,  #if hparams.use_amp else 32,
+        strategy="ddp_sharded", #"fsdp", #"ddp_sharded", #"horovod", #"deepspeed", #"ddp_sharded",
+        # strategy="fsdp", #"fsdp", #"ddp_sharded", #"horovod", #"deepspeed", #"ddp_sharded",
+        # precision=16,  #if hparams.use_amp else 32,
         # amp_backend='apex',
         # amp_level='O1', # see https://nvidia.github.io/apex/amp.html#opt-levels
         # stochastic_weight_avg=True,
