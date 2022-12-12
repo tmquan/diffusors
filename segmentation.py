@@ -153,7 +153,7 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
                 HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
                 # RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.1, padding_mode='constant', mode=["area", "nearest", "area"]), 
                 RandFlipd(keys=["image", "label", "unsup"], prob=0.5, spatial_axis=0),
-                RandAffined(keys=["image", "label", "unsup"], prob=1.0, rotate_range=0.1, translate_range=10, scale_range=0.1, padding_mode='zeros', mode=["bilinear", "nearest", "bilinear"]), 
+                RandAffined(keys=["image", "label", "unsup"], prob=1.0, rotate_range=0.1, translate_range=10, scale_range=0.01, padding_mode='zeros', mode=["bilinear", "nearest", "bilinear"]), 
                 Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
                 DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
                 ToTensord(keys=["image", "label", "unsup"],),
