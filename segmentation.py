@@ -263,20 +263,20 @@ class DDMMLightningModule(LightningModule):
         label_p = torch.ones_like(gamma_p)
         
         # 1st pass, supervised
-        loss_super = self.diffusion.forward(torch.cat([image, label], dim=0), 
+        super_loss = self.diffusion.forward(torch.cat([image, label], dim=0), 
                                             classes = torch.cat([image_p.long(), label_p.long()], dim=0), 
                                             noise = torch.cat([noise_p, noise_p], dim=0)
                                             )
         # 1st pass, unsupervised
-        loss_unsup = self.diffusion.forward(unsup, 
+        unsup_loss = self.diffusion.forward(unsup, 
                                             classes = unsup_u.long(), 
                                             noise = noise_u
                                             )
 
-        self.log(f'{stage}_loss_super', loss_super, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
-        self.log(f'{stage}_loss_unsup', loss_unsup, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        self.log(f'{stage}_unsup_loss', unsup_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
         
-        loss = loss_super + loss_unsup
+        loss = super_loss + unsup_loss
         
 
         if batch_idx % 10 == 0:
