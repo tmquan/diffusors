@@ -3,6 +3,7 @@ import glob
 
 from typing import Optional, Union, List, Dict, Sequence, Callable
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision
@@ -41,7 +42,55 @@ from monai.transforms import (
     ToTensord,
 )
 # from data import CustomDataModule
-from cdiff import *
+# from cdiff import *
+from diffusers import UNet2DModel, DDPMScheduler
+class ClassConditionedUNet(nn.Module):
+    def __init__(self, shape= 256, num_classes=2, class_emb_size=2):
+        super().__init__()
+        
+        # The embedding layer will map the class label to a vector of size class_emb_size
+        self.class_emb = nn.Embedding(num_classes, class_emb_size)
+
+        # Self.model is an unconditional UNet with extra input channels to accept the conditioning information (the class embedding)
+        self.model = UNet2DModel(
+            sample_size=shape,  # the target image resolution
+            in_channels=1 + class_emb_size,  # the number of input channels, 3 for RGB images
+            out_channels=1,  # the number of output channels
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channes for each UNet block
+            down_block_types=( 
+                "DownBlock2D",  # a regular ResNet downsampling block
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+                "DownBlock2D",
+            ), 
+            up_block_types=(
+                "UpBlock2D",  # a regular ResNet upsampling block
+                "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D"  
+            ),
+        )
+
+    # Our forward method now takes the class labels as an additional argument
+    def forward(self, x, t, class_labels):
+        # Shape of x:
+        bs, ch, w, h = x.shape
+        
+        # class conditioning in right shape to add as additional input channels
+        class_cond = self.class_emb(class_labels) # Map to embedding dinemsion
+        class_cond = class_cond.view(bs, class_cond.shape[1], 1, 1).expand(bs, class_cond.shape[1], w, h)
+        # x is shape (bs, 1, 28, 28) and class_cond is now (bs, 4, 28, 28)
+
+        # Net input is now x and class cond concatenated together along dimension 1
+        net_input = torch.cat((x, class_cond), 1) # (bs, 5, 28, 28)
+
+        # Feed this to the unet alongside the timestep and return the prediction
+        return self.model(net_input, t).sample # (bs, 1, 28, 28)
 
 class PairedAndUnsupervisedDataset(monai.data.Dataset, monai.transforms.Randomizable):
     def __init__(
@@ -218,72 +267,81 @@ class DDMMLightningModule(LightningModule):
         self.num_timesteps = hparams.timesteps
         self.batch_size = hparams.batch_size
         self.shape = hparams.shape
+        
         self.num_classes = 2
         self.timesteps = hparams.timesteps
-        model = Unet(
-            dim = 64,
-            dim_mults = (1, 2, 4, 8),
-            num_classes = self.num_classes,
-            cond_drop_prob = 0.5, 
-            channels = 1,
-        )
-        self.diffusion = GaussianDiffusion(
-            model,
-            image_size = self.shape,
-            timesteps = self.timesteps
-        )
+        
+        # Create a scheduler
+        self.noise_scheduler = DDPMScheduler(num_train_timesteps=self.timesteps, beta_schedule='squaredcos_cap_v2')
 
+        # The embedding layer will map the class label to a vector of size class_emb_size
+        self.diffusion = ClassConditionedUNet(
+            shape=self.shape,
+            num_classes=2,
+            class_emb_size=2,
+        )
+        self.loss_func = nn.SmoothL1Loss(reduction="mean", beta=0.02)
         self.save_hyperparameters()
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
         _device = image.device
-        batches = image.shape[0]
 
-        # noise_p = torch.randn_like(image)
-        # noise_u = torch.randn_like(unsup)
-        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
-        #                                           torch.cat([t_p, t_u], dim=0), 
-        #                                           torch.cat([noise_p, noise_u], dim=0))
-        # # loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
-        # #                                           torch.cat([t_p, t_p], dim=0), 
-        # #                                           torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)     
-        # loss_label = self.diffusion_label.forward(label, 
-        #                                           t_p, 
-        #                                           noise_p)      
+        rng_p = torch.torch.randn_like(image)
+        rng_u = torch.torch.randn_like(unsup)
 
-        noise_p = torch.randn_like(image)
-        noise_u = torch.randn_like(unsup)
-        
-        gamma_p = torch.rand(batches).to(_device) #.view(batches, 1, 1, 1).repeat(1, 1, self.shape, self.shape)
-        image_p = torch.zeros_like(gamma_p)
-        unsup_u = torch.zeros_like(gamma_p)
-        label_p = torch.ones_like(gamma_p)
-        
+        bs = image.shape[0]
+
+        # Sample a random timestep for each image
+        timesteps = torch.randint(0, self.noise_scheduler.num_train_timesteps, (bs,), device=_device).long()
+        gamma = torch.rand(bs).to(_device)
+
         # 1st pass, supervised
-        super_loss = self.diffusion.forward(torch.cat([image, label], dim=0), 
-                                            classes = torch.cat([image_p.long(), label_p.long()], dim=0), 
-                                            noise = torch.cat([noise_p, noise_p], dim=0)
-                                            )
-        # 2nd pass, unsupervised
-        unsup_loss = self.diffusion.forward(unsup, 
-                                            classes = unsup_u.long(), 
-                                            noise = noise_u
-                                            )
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        mid_i = self.noise_scheduler.add_noise(image * 2.0 - 1.0, rng_p, timesteps)
+        mid_l = self.noise_scheduler.add_noise(label * 2.0 - 1.0, rng_p, timesteps)
+        
+        cls_i = torch.zeros_like(gamma).long()
+        cls_l = torch.ones_like(gamma).long()
+        
+        est_i = self.diffusion.forward(mid_i, timesteps, cls_i)
+        est_l = self.diffusion.forward(mid_l, timesteps, cls_l)
+        
+        super_loss = self.loss_func(est_i, rng_p) \
+                   + self.loss_func(est_l, rng_p)
 
+        # 2nd pass, unsupervised
+        mid_u = self.noise_scheduler.add_noise(unsup * 2.0 - 1.0, rng_u, timesteps)
+        cls_u = torch.zeros_like(gamma).long()
+        est_u = self.diffusion.forward(mid_u, timesteps, cls_u)
+        unsup_loss = self.loss_func(est_u, rng_u)
+        
         self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
         self.log(f'{stage}_unsup_loss', unsup_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
         
-        loss = super_loss + unsup_loss
-        
+        loss = super_loss + unsup_loss     
 
         if stage == 'train' and batch_idx % 10 == 0:
-            noise_samples = torch.randn_like(unsup)
-            image_samples = self.diffusion.sample(classes=image_p.long(), noise = noise_samples)
-            label_samples = self.diffusion.sample(classes=label_p.long(), noise = noise_samples)
-            viz2d = torch.cat([unsup, image, label, image_samples, label_samples], dim=-1).transpose(2, 3)
+            # noise_samples = torch.randn_like(unsup)
+            # image_samples = self.diffusion.sample(classes=image_p.long(), noise = noise_samples)
+            # label_samples = self.diffusion.sample(classes=label_p.long(), noise = noise_samples)
+            with torch.no_grad():
+                rng = torch.randn_like(image)
+                sam_i = rng.clone().detach()
+                sam_l = rng.clone().detach()
+                for i, t in enumerate(self.noise_scheduler.timesteps):
+                    res_i = self.diffusion.forward(sam_i, t, cls_i.long())
+                    res_l = self.diffusion.forward(sam_l, t, cls_l.long())
+
+                    # Update sample with step
+                    sam_i = self.noise_scheduler.step(res_i, t, sam_i).prev_sample
+                    sam_l = self.noise_scheduler.step(res_l, t, sam_l).prev_sample
+
+                sam_i = sam_i * 0.5 + 0.5
+                sam_l = sam_l * 0.5 + 0.5
+           
+            viz2d = torch.cat([image, label, sam_i, sam_l, unsup], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)

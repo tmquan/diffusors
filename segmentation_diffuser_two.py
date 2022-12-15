@@ -3,6 +3,7 @@ import glob
 
 from typing import Optional, Union, List, Dict, Sequence, Callable
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision
@@ -41,7 +42,8 @@ from monai.transforms import (
     ToTensord,
 )
 # from data import CustomDataModule
-from cdiff import *
+# from cdiff import *
+from diffusers import UNet2DModel, DDPMScheduler
 
 class PairedAndUnsupervisedDataset(monai.data.Dataset, monai.transforms.Randomizable):
     def __init__(
@@ -218,72 +220,116 @@ class DDMMLightningModule(LightningModule):
         self.num_timesteps = hparams.timesteps
         self.batch_size = hparams.batch_size
         self.shape = hparams.shape
+        
         self.num_classes = 2
         self.timesteps = hparams.timesteps
-        model = Unet(
-            dim = 64,
-            dim_mults = (1, 2, 4, 8),
-            num_classes = self.num_classes,
-            cond_drop_prob = 0.5, 
-            channels = 1,
-        )
-        self.diffusion = GaussianDiffusion(
-            model,
-            image_size = self.shape,
-            timesteps = self.timesteps
+        
+        # Create a scheduler
+        self.noise_scheduler = DDPMScheduler(num_train_timesteps=self.timesteps, beta_schedule='squaredcos_cap_v2')
+
+        # The embedding layer will map the class label to a vector of size class_emb_size
+        self.diffusion_image = UNet2DModel(
+            sample_size=self.shape,  # the target image resolution
+            in_channels=1,  # the number of input channels, 3 for RGB images
+            out_channels=1,  # the number of output channels
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channes for each UNet block
+            down_block_types=( 
+                "DownBlock2D",  # a regular ResNet downsampling block
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+                "DownBlock2D",
+            ), 
+            up_block_types=(
+                "UpBlock2D",  # a regular ResNet upsampling block
+                "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D"  
+            ),
         )
 
+        self.diffusion_label = UNet2DModel(
+            sample_size=self.shape,  # the target image resolution
+            in_channels=1,  # the number of input channels, 3 for RGB images
+            out_channels=1,  # the number of output channels
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channes for each UNet block
+            down_block_types=( 
+                "DownBlock2D",  # a regular ResNet downsampling block
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "DownBlock2D", 
+                "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+                "DownBlock2D",
+            ), 
+            up_block_types=(
+                "UpBlock2D",  # a regular ResNet upsampling block
+                "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D", 
+                "UpBlock2D"  
+            ),
+        )
+
+        self.loss_func = nn.SmoothL1Loss(reduction="mean", beta=0.02)
         self.save_hyperparameters()
 
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
         image, label, unsup = batch["image"], batch["label"], batch["unsup"]
         _device = image.device
-        batches = image.shape[0]
 
-        # noise_p = torch.randn_like(image)
-        # noise_u = torch.randn_like(unsup)
-        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
-        #                                           torch.cat([t_p, t_u], dim=0), 
-        #                                           torch.cat([noise_p, noise_u], dim=0))
-        # # loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
-        # #                                           torch.cat([t_p, t_p], dim=0), 
-        # #                                           torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)     
-        # loss_label = self.diffusion_label.forward(label, 
-        #                                           t_p, 
-        #                                           noise_p)      
+        rng_p = torch.randn_like(image)
+        rng_u = torch.randn_like(unsup)
 
-        noise_p = torch.randn_like(image)
-        noise_u = torch.randn_like(unsup)
-        
-        gamma_p = torch.rand(batches).to(_device) #.view(batches, 1, 1, 1).repeat(1, 1, self.shape, self.shape)
-        image_p = torch.zeros_like(gamma_p)
-        unsup_u = torch.zeros_like(gamma_p)
-        label_p = torch.ones_like(gamma_p)
+        bs = image.shape[0]
+
+        # Sample a random timestep for each image
+        timesteps = torch.randint(0, self.noise_scheduler.num_train_timesteps, (bs,), device=_device).long()
         
         # 1st pass, supervised
-        super_loss = self.diffusion.forward(torch.cat([image, label], dim=0), 
-                                            classes = torch.cat([image_p.long(), label_p.long()], dim=0), 
-                                            noise = torch.cat([noise_p, noise_p], dim=0)
-                                            )
-        # 2nd pass, unsupervised
-        unsup_loss = self.diffusion.forward(unsup, 
-                                            classes = unsup_u.long(), 
-                                            noise = noise_u
-                                            )
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        mid_i = self.noise_scheduler.add_noise(image * 2.0 - 1.0, rng_p, timesteps)
+        mid_l = self.noise_scheduler.add_noise(label * 2.0 - 1.0, rng_p, timesteps)
+        
+        est_i = self.diffusion_image.forward(mid_i, timesteps).sample
+        est_l = self.diffusion_label.forward(mid_l, timesteps).sample
 
+        super_loss = self.loss_func(est_i, rng_p) \
+                   + self.loss_func(est_l, rng_p)
+
+        # 2nd pass, unsupervised
+        mid_u = self.noise_scheduler.add_noise(unsup * 2.0 - 1.0, rng_u, timesteps)
+        est_u = self.diffusion_image.forward(mid_u, timesteps).sample
+        unsup_loss = self.loss_func(est_u, rng_u)
+        
         self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
         self.log(f'{stage}_unsup_loss', unsup_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
         
-        loss = super_loss + unsup_loss
-        
+        loss = super_loss + unsup_loss     
 
         if stage == 'train' and batch_idx % 10 == 0:
-            noise_samples = torch.randn_like(unsup)
-            image_samples = self.diffusion.sample(classes=image_p.long(), noise = noise_samples)
-            label_samples = self.diffusion.sample(classes=label_p.long(), noise = noise_samples)
-            viz2d = torch.cat([unsup, image, label, image_samples, label_samples], dim=-1).transpose(2, 3)
+            with torch.no_grad():
+                rng = torch.randn_like(image)
+                sam_i = rng.clone().detach()
+                sam_l = rng.clone().detach()
+                for i, t in enumerate(self.noise_scheduler.timesteps):
+                    res_i = self.diffusion_image.forward(sam_i, t).sample
+                    res_l = self.diffusion_label.forward(sam_l, t).sample
+
+                    # Update sample with step
+                    sam_i = self.noise_scheduler.step(res_i, t, sam_i).prev_sample
+                    sam_l = self.noise_scheduler.step(res_l, t, sam_l).prev_sample
+
+                sam_i = sam_i * 0.5 + 0.5
+                sam_l = sam_l * 0.5 + 0.5
+           
+            viz2d = torch.cat([image, label, sam_i, sam_l, unsup], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)
