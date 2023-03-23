@@ -3,8 +3,8 @@ import glob
 
 from typing import Optional, Union, List, Dict, Sequence, Callable
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-
 import torchvision
 
 from argparse import ArgumentParser
@@ -16,9 +16,12 @@ from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from pytorch_lightning.utilities.seed import seed_everything
 
+from diffusers import UNet2DModel
+from diffusers import DDPMScheduler
+
 import monai 
 from monai.data import Dataset, CacheDataset, DataLoader
-from monai.data import list_data_collate, decollate_batch
+from monai.data import pad_list_data_collate, decollate_batch
 from monai.utils import first, set_determinism, get_seed, MAX_SEED
 from monai.transforms import (
     apply_transform, 
@@ -40,10 +43,8 @@ from monai.transforms import (
     ScaleIntensityRanged, 
     ToTensord,
 )
-# from data import CustomDataModule
-from cdiff import *
 
-class PairedAndUnsupervisedDataset(monai.data.Dataset, monai.transforms.Randomizable):
+class PairedAndUnpairedDataset(Dataset, Randomizable):
     def __init__(
         self,
         keys: Sequence, 
@@ -68,31 +69,35 @@ class PairedAndUnsupervisedDataset(monai.data.Dataset, monai.transforms.Randomiz
     def _transform(self, index: int):
         data = {}
         self.R.seed(index)
-        # for key, dataset in zip(self.keys, self.data):
-        #     rand_idx = self.R.randint(0, len(dataset)) 
-        #     data[key] = dataset[rand_idx]
+        
         rand_idx = self.R.randint(0, len(self.data[0])) 
         data[self.keys[0]] = self.data[0][rand_idx] # image
         data[self.keys[1]] = self.data[1][rand_idx] # label
+        
         rand_idy = self.R.randint(0, len(self.data[2])) 
         data[self.keys[2]] = self.data[2][rand_idy] # unsup
+        rand_idz = self.R.randint(0, len(self.data[3]))
+        data[self.keys[3]] = self.data[3][rand_idz] # unsup
 
         if self.transform is not None:
             data = apply_transform(self.transform, data)
 
         return data
 
-class PairedAndUnsupervisedDataModule(LightningDataModule):
+class PairedAndUnpairedDataModule(LightningDataModule):
     def __init__(self, 
-        train_image_dirs: str = "path/to/dir", 
-        train_label_dirs: str = "path/to/dir", 
-        train_unsup_dirs: str = "path/to/dir", 
-        val_image_dirs: str = "path/to/dir", 
-        val_label_dirs: str = "path/to/dir", 
-        val_unsup_dirs: str = "path/to/dir", 
-        test_image_dirs: str = "path/to/dir", 
-        test_label_dirs: str = "path/to/dir", 
-        test_unsup_dirs: str = "path/to/dir", 
+        train_ssource_dirs: List[str] = ["path/to/dir"], 
+        train_starget_dirs: List[str] = ["path/to/dir"], 
+        train_usource_dirs: List[str] = ["path/to/dir"], 
+        train_utarget_dirs: List[str] = ["path/to/dir"], 
+        val_ssource_dirs: List[str] = ["path/to/dir"], 
+        val_starget_dirs: List[str] = ["path/to/dir"], 
+        val_usource_dirs: List[str] = ["path/to/dir"], 
+        val_utarget_dirs: List[str] = ["path/to/dir"], 
+        test_ssource_dirs: List[str] = ["path/to/dir"], 
+        test_starget_dirs: List[str] = ["path/to/dir"], 
+        test_usource_dirs: List[str] = ["path/to/dir"], 
+        test_utarget_dirs: List[str] = ["path/to/dir"], 
         shape: int = 256,
         batch_size: int = 32, 
         train_samples: int = 4000,
@@ -104,21 +109,24 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.shape = shape
         # self.setup() 
-        self.train_image_dirs = train_image_dirs
-        self.train_label_dirs = train_label_dirs
-        self.train_unsup_dirs = train_unsup_dirs
-        self.val_image_dirs = val_image_dirs
-        self.val_label_dirs = val_label_dirs
-        self.val_unsup_dirs = val_unsup_dirs
-        self.test_image_dirs = test_image_dirs
-        self.test_label_dirs = test_label_dirs
-        self.test_unsup_dirs = test_unsup_dirs
+        self.train_ssource_dirs = train_ssource_dirs
+        self.train_starget_dirs = train_starget_dirs
+        self.train_usource_dirs = train_usource_dirs
+        self.train_utarget_dirs = train_utarget_dirs
+        self.val_ssource_dirs = val_ssource_dirs
+        self.val_starget_dirs = val_starget_dirs
+        self.val_usource_dirs = val_usource_dirs
+        self.val_utarget_dirs = val_utarget_dirs
+        self.test_ssource_dirs = test_ssource_dirs
+        self.test_starget_dirs = test_starget_dirs
+        self.test_usource_dirs = test_usource_dirs
+        self.test_utarget_dirs = test_utarget_dirs
         self.train_samples = train_samples
         self.val_samples = val_samples
         self.test_samples = test_samples
 
         # self.setup()
-        def glob_files(folders: str=None, extension: str='*.nii.gz'):
+        def glob_files(folders: List[str]=None, extension: str='*.nii.gz'):
             assert folders is not None
             paths = [glob.glob(os.path.join(folder, extension), recursive = True) for folder in folders]
             files = sorted([item for sublist in paths for item in sublist])
@@ -126,16 +134,20 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
             print(files[:1])
             return files
             
-        self.train_image_files = glob_files(folders=train_image_dirs, extension='**/*.png')
-        self.train_label_files = glob_files(folders=train_label_dirs, extension='**/*.png')
-        self.train_unsup_files = glob_files(folders=train_unsup_dirs, extension='**/*.png')
-        self.val_image_files = glob_files(folders=val_image_dirs, extension='**/*.png')
-        self.val_label_files = glob_files(folders=val_label_dirs, extension='**/*.png')
-        self.val_unsup_files = glob_files(folders=val_unsup_dirs, extension='**/*.png')
-        self.test_image_files = glob_files(folders=test_image_dirs, extension='**/*.png')
-        self.test_label_files = glob_files(folders=test_label_dirs, extension='**/*.png')
-        self.test_unsup_files = glob_files(folders=test_unsup_dirs, extension='**/*.png')
+        self.train_ssource_files = glob_files(folders=train_ssource_dirs, extension='**/*.png')
+        self.train_starget_files = glob_files(folders=train_starget_dirs, extension='**/*.png')
+        self.train_usource_files = glob_files(folders=train_usource_dirs, extension='**/*.png')
+        self.train_utarget_files = glob_files(folders=train_utarget_dirs, extension='**/*.png')
 
+        self.val_ssource_files = glob_files(folders=val_ssource_dirs, extension='**/*.png')
+        self.val_starget_files = glob_files(folders=val_starget_dirs, extension='**/*.png')
+        self.val_usource_files = glob_files(folders=val_usource_dirs, extension='**/*.png')
+        self.val_utarget_files = glob_files(folders=val_utarget_dirs, extension='**/*.png')
+        
+        self.test_ssource_files = glob_files(folders=test_ssource_dirs, extension='**/*.png')
+        self.test_starget_files = glob_files(folders=test_starget_dirs, extension='**/*.png')
+        self.test_usource_files = glob_files(folders=test_usource_dirs, extension='**/*.png')
+        self.test_utarget_files = glob_files(folders=test_utarget_dirs, extension='**/*.png')
 
     def setup(self, seed: int=42, stage: Optional[str]=None):
         # make assignments here (val/train/test split)
@@ -145,34 +157,31 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
     def train_dataloader(self):
         self.train_transforms = Compose(
             [
-                LoadImaged(keys=["image", "label", "unsup"], ensure_channel_first=True),
-                # AddChanneld(keys=["image", "label", "unsup"],),
-                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
-                ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
-                # CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
-                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
-                # RandZoomd(keys=["image", "label", "unsup"], prob=1.0, min_zoom=0.9, max_zoom=1.1, padding_mode='constant', mode=["area", "nearest", "area"]), 
-                RandFlipd(keys=["image", "label", "unsup"], prob=0.5, spatial_axis=0),
-                # RandAffined(keys=["image", "label", "unsup"], prob=1.0, rotate_range=0.1, translate_range=10, scale_range=0.01, padding_mode='zeros', mode=["bilinear", "nearest", "bilinear"]), 
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
-                DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
-                ToTensord(keys=["image", "label", "unsup"],),
+                LoadImaged(keys=["source", "target", "images", "labels"], ensure_channel_first=True),
+                # AddChanneld(keys=["source", "target", "images", "labels"]),
+                ScaleIntensityRanged(keys=["target", "labels"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
+                ScaleIntensityd(keys=["source", "target", "images", "labels"], minv=0.0, maxv=1.0,),
+                HistogramNormalized(keys=["source", "images"], min=0.0, max=1.0,), # type: ignore
+                RandFlipd(keys=["source", "target", "images", "labels"], prob=0.5, spatial_axis=0),
+                Resized(keys=["source", "target", "images", "labels"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area", "nearest"]),
+                DivisiblePadd(keys=["source", "target", "images", "labels"], k=256, mode="constant", constant_values=0.0),
+                ToTensord(keys=["source", "target", "images", "labels"],),
             ]
         )
 
-        self.train_datasets = PairedAndUnsupervisedDataset(
-            keys=["image", "label", "unsup"],
-            data=[self.train_image_files, self.train_label_files, self.train_unsup_files], 
+        self.train_datasets = PairedAndUnpairedDataset(
+            keys=["source", "target", "images", "labels"],
+            data=[self.train_ssource_files, self.train_starget_files, self.train_usource_files, self.train_utarget_files],
             transform=self.train_transforms,
-            length=self.train_samples,
+            length=self.train_samples, # type: ignore
             batch_size=self.batch_size,
         )
 
         self.train_loader = DataLoader(
             self.train_datasets, 
             batch_size=self.batch_size, 
-            num_workers=16, 
-            collate_fn=list_data_collate,
+            num_workers=4, 
+            collate_fn=pad_list_data_collate,
             shuffle=True,
         )
         return self.train_loader
@@ -180,31 +189,31 @@ class PairedAndUnsupervisedDataModule(LightningDataModule):
     def val_dataloader(self):
         self.val_transforms = Compose(
             [
-                LoadImaged(keys=["image", "label", "unsup"], ensure_channel_first=True),
-                #AddChanneld(keys=["image", "label", "unsup"],),
-                ScaleIntensityRanged(keys=["label"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
-                ScaleIntensityd(keys=["image", "label", "unsup"], minv=0.0, maxv=1.0,),
-                # CropForegroundd(keys=["image", "label", "unsup"], source_key="image", select_fn=(lambda x: x>0), margin=0),
-                HistogramNormalized(keys=["image", "unsup"], min=0.0, max=1.0,),
-                Resized(keys=["image", "label", "unsup"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area"]),
-                DivisiblePadd(keys=["image", "label", "unsup"], k=256, mode="constant", constant_values=0),
-                ToTensord(keys=["image", "label", "unsup"],),
+                LoadImaged(keys=["source", "target", "images", "labels"], ensure_channel_first=True),
+                # AddChanneld(keys=["source", "target", "images", "labels"]),
+                ScaleIntensityRanged(keys=["target", "labels"], a_min=0, a_max=128, b_min=0, b_max=1, clip=True),
+                ScaleIntensityd(keys=["source", "target", "images", "labels"], minv=0.0, maxv=1.0,),
+                HistogramNormalized(keys=["source", "images"], min=0.0, max=1.0,),  # type: ignore
+                RandFlipd(keys=["source", "target", "images", "labels"], prob=0.5, spatial_axis=0),
+                Resized(keys=["source", "target", "images", "labels"], spatial_size=256, size_mode="longest", mode=["area", "nearest", "area", "nearest"]),
+                DivisiblePadd(keys=["source", "target", "images", "labels"], k=256, mode="constant", constant_values=0.0),
+                ToTensord(keys=["source", "target", "images", "labels"],),
             ]
         )
 
-        self.val_datasets = PairedAndUnsupervisedDataset(
-            keys=["image", "label", "unsup"],
-            data=[self.val_image_files, self.val_label_files, self.val_unsup_files], 
+        self.val_datasets = PairedAndUnpairedDataset(
+            keys=["source", "target", "images", "labels"],
+            data=[self.val_ssource_files, self.val_starget_files, self.val_usource_files, self.val_utarget_files],
             transform=self.val_transforms,
-            length=self.val_samples,
+            length=self.val_samples,  # type: ignore
             batch_size=self.batch_size,
         )
         
         self.val_loader = DataLoader(
             self.val_datasets, 
             batch_size=self.batch_size, 
-            num_workers=8, 
-            collate_fn=list_data_collate,
+            num_workers=4, 
+            collate_fn=pad_list_data_collate,
             shuffle=True,
         )
         return self.val_loader
@@ -220,74 +229,132 @@ class DDMMLightningModule(LightningModule):
         self.shape = hparams.shape
         self.num_classes = 2
         self.timesteps = hparams.timesteps
-        model = Unet(
-            dim = 64,
-            dim_mults = (1, 2, 4, 8),
-            num_classes = self.num_classes,
-            cond_drop_prob = 0.5, 
-            channels = 1,
+
+        self.noise2space = UNet2DModel(
+            sample_size=self.shape,
+            in_channels=1,
+            out_channels=1,
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            # (32, 48, 80, 224, 640),  # More channels -> more parameters
+            block_out_channels=(32, 48, 80, 224, 640), # type: ignore
+            norm_num_groups=8,
+            down_block_types=(
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D",
+                "AttnDownBlock2D",
+                "AttnDownBlock2D",
+            ), # type: ignore
+            up_block_types=(
+                "AttnUpBlock2D",
+                "AttnUpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+            ), # type: ignore
+            class_embed_type="timestep",
         )
-        self.diffusion = GaussianDiffusion(
-            model,
-            image_size = self.shape,
-            timesteps = self.timesteps
+        
+        self.image2label = UNet2DModel(
+            sample_size=self.shape,
+            in_channels=1,
+            out_channels=1,
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            # (32, 48, 80, 224, 640),  # More channels -> more parameters
+            block_out_channels=(32, 48, 80, 224, 640),
+            norm_num_groups=8,
+            down_block_types=(
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D",
+                "AttnDownBlock2D",
+                "AttnDownBlock2D",
+            ),  # type: ignore
+            up_block_types=(
+                "AttnUpBlock2D",
+                "AttnUpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+            ),  # type: ignore
+            class_embed_type="timestep",
+        )
+        
+        self.label2image = UNet2DModel(
+            sample_size=self.shape,
+            in_channels=1,
+            out_channels=1,
+            layers_per_block=2,  # how many ResNet layers to use per UNet block
+            # (32, 48, 80, 224, 640),  # More channels -> more parameters
+            block_out_channels=(32, 48, 80, 224, 640), # type: ignore
+            norm_num_groups=8,
+            down_block_types=(
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D",
+                "AttnDownBlock2D",
+                "AttnDownBlock2D",
+            ),  # type: ignore
+            up_block_types=(
+                "AttnUpBlock2D",
+                "AttnUpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+            ),  # type: ignore
+            class_embed_type="timestep",
         )
 
-        self.save_hyperparameters()
-
+        self.scheduler = DDPMScheduler(num_train_timesteps=100)
+        self.loss_func = nn.L1Loss()
+        
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
-        image, label, unsup = batch["image"], batch["label"], batch["unsup"]
-        _device = image.device
-        batches = image.shape[0]
-
-        # noise_p = torch.randn_like(image)
-        # noise_u = torch.randn_like(unsup)
-        # t_p = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # t_u = torch.randint(0, self.num_timesteps, (self.batch_size,), device=self.device).long()
-        # loss_image = self.diffusion_image.forward(torch.cat([image, unsup], dim=0), 
-        #                                           torch.cat([t_p, t_u], dim=0), 
-        #                                           torch.cat([noise_p, noise_u], dim=0))
-        # # loss_label = self.diffusion_label.forward(torch.cat([label, label], dim=0), 
-        # #                                           torch.cat([t_p, t_p], dim=0), 
-        # #                                           torch.cat([noise_p, noise_p], dim=0)) #(label, t_p, noise_p)     
-        # loss_label = self.diffusion_label.forward(label, 
-        #                                           t_p, 
-        #                                           noise_p)      
-
-        noise_p = torch.randn_like(image)
-        noise_u = torch.randn_like(unsup)
+        source, target, images, labels = batch["source"], batch["target"], batch["images"], batch["labels"]
+        _device = source.device
+        batches = source.shape[0]
+        # print(source.shape, target.shape, images.shape, labels.shape)
         
-        gamma_p = torch.rand(batches).to(_device) #.view(batches, 1, 1, 1).repeat(1, 1, self.shape, self.shape)
-        image_p = torch.zeros_like(gamma_p)
-        unsup_u = torch.zeros_like(gamma_p)
-        label_p = torch.ones_like(gamma_p)
+        # Sample noise to add to the images
+        noise = torch.randn_like(source)
+        # Sample a random timestep for each image
+        timesteps = torch.randint(0, self.scheduler.num_train_timesteps, (batches,), device=_device).long() # type: ignore
         
-        # 1st pass, supervised
-        super_loss = self.diffusion.forward(torch.cat([image, label], dim=0), 
-                                            classes = torch.cat([image_p.long(), label_p.long()], dim=0), 
-                                            noise = torch.cat([noise_p, noise_p], dim=0)
-                                            )
-        # 2nd pass, unsupervised
-        unsup_loss = self.diffusion.forward(unsup, 
-                                            classes = unsup_u.long(), 
-                                            noise = noise_u
-                                            )
-
-        self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
-        self.log(f'{stage}_unsup_loss', unsup_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_source = self.scheduler.add_noise(source * 2.0 - 1.0, noise, timesteps) # type: ignore
+        noisy_target = self.scheduler.add_noise(target * 2.0 - 1.0, noise, timesteps) # type: ignore
         
-        loss = super_loss + unsup_loss
+        class_source = torch.zeros(batches, device=_device)
+        class_target = torch.ones(batches, device=_device)
         
-
+        loss = 0
+        # Predict the noise residual
+        noise_pred_source = self.noise2space.forward(noisy_source, timesteps, class_labels=class_source, return_dict=False)[0]
+        noise_pred_target = self.noise2space.forward(noisy_target, timesteps, class_labels=class_target, return_dict=False)[0]
+        loss += self.loss_func(noise, noise_pred_source)
+        loss += self.loss_func(noise, noise_pred_target)
+        
         if stage == 'train' and batch_idx % 10 == 0:
-            noise_samples = torch.randn_like(unsup)
-            image_samples = self.diffusion.sample(classes=image_p.long(), noise = noise_samples)
-            label_samples = self.diffusion.sample(classes=label_p.long(), noise = noise_samples)
-            viz2d = torch.cat([unsup, image, label, image_samples, label_samples], dim=-1).transpose(2, 3)
+            with torch.no_grad():
+                smp_source = noise.clone()
+                smp_target = noise.clone()
+                for i, t in enumerate(self.scheduler.timesteps):
+                    # 1. predict noise model_output
+                    out_source = self.noise2space.forward(smp_source, t, class_source.long()).sample # type: ignore
+                    out_target = self.noise2space.forward(smp_target, t, class_target.long()).sample # type: ignore
+
+                    # 2. compute previous image: x_t -> x_t-1
+                    smp_source = self.scheduler.step(out_source, t, smp_source).prev_sample # type: ignore
+                    smp_target = self.scheduler.step(out_target, t, smp_target).prev_sample  # type: ignore
+
+                smp_source = smp_source * 0.5 + 0.5
+                smp_target = smp_target * 0.5 + 0.5
+           
+            viz2d = torch.cat([source, target, smp_source, smp_target], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)
-        
+            
         info = {f'loss': loss} 
         return info
 
@@ -314,7 +381,7 @@ class DDMMLightningModule(LightningModule):
         return self._common_epoch_end(outputs, stage='test')
 
     def configure_optimizers(self):
-        optimizer = torch.optim.RAdam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 20], gamma=0.1)
         return [optimizer], [scheduler]
 
@@ -340,62 +407,88 @@ if __name__ == "__main__":
     parser = Trainer.add_argparse_args(parser)
     
     # Collect the hyper parameters
-    hparams = parser.parse_args()
+    hparams = parser.parse_args() # type: ignore
     # Create data module
     
-    train_image_dirs = [
+    train_ssource_dirs = [
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
         # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
-    train_label_dirs = [
+    train_starget_dirs = [
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
-        
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
-
-    train_unsup_dirs = [
-        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
-    ]
-
-    val_image_dirs = [
+    train_usource_dirs = [
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
-
-    val_label_dirs = [
+    train_utarget_dirs = [
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
     ]
 
-    val_unsup_dirs = [
+
+    val_ssource_dirs = [
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
+    ]
+    val_starget_dirs = [
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
+    ]
+    val_usource_dirs = [
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/images'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/images'), 
+        # os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/train/images/'), 
         os.path.join(hparams.datadir, 'SpineXRVertSegmentation/VinDr/v1/processed/test/images/'), 
     ]
-    test_image_dirs = val_image_dirs
-    test_label_dirs = val_label_dirs
-    test_unsup_dirs = val_unsup_dirs
+    val_utarget_dirs = [
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62020/20200501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62022/20220501/raw/labels'), 
+        os.path.join(hparams.datadir, 'SpineXRVertSegmentation/T62021/20211101/raw/labels'), 
+    ]
+    
+    test_ssource_dirs = val_ssource_dirs
+    test_starget_dirs = val_starget_dirs
+    test_usource_dirs = val_usource_dirs
+    test_utarget_dirs = val_utarget_dirs
 
-    datamodule = PairedAndUnsupervisedDataModule(
-        train_image_dirs = train_image_dirs, 
-        train_label_dirs = train_label_dirs, 
-        train_unsup_dirs = train_unsup_dirs, 
-        val_image_dirs = val_image_dirs, 
-        val_label_dirs = val_label_dirs, 
-        val_unsup_dirs = val_unsup_dirs, 
-        test_image_dirs = test_image_dirs, 
-        test_label_dirs = test_label_dirs, 
-        test_unsup_dirs = test_unsup_dirs, 
+    datamodule = PairedAndUnpairedDataModule(
+        train_ssource_dirs = train_ssource_dirs, 
+        train_starget_dirs = train_starget_dirs, 
+        train_usource_dirs = train_usource_dirs, 
+        train_utarget_dirs = train_utarget_dirs, 
+        val_ssource_dirs = val_ssource_dirs, 
+        val_starget_dirs = val_starget_dirs, 
+        val_usource_dirs = val_usource_dirs, 
+        val_utarget_dirs = val_utarget_dirs, 
+        test_ssource_dirs=test_ssource_dirs,
+        test_starget_dirs=test_starget_dirs,
+        test_usource_dirs=test_usource_dirs,
+        test_utarget_dirs=test_utarget_dirs,
         train_samples = hparams.train_samples,
         val_samples = hparams.val_samples,
         test_samples = hparams.test_samples,
         batch_size = hparams.batch_size, 
         shape = hparams.shape,
-        # keys = ["image", "label", "unsup"]
+        # keys = ["source", "target", "images", "labels"]
     )
 
     datamodule.setup(seed=hparams.seed)
