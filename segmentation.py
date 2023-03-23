@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torchvision
 
 from argparse import ArgumentParser
-
+from tqdm import tqdm
 from pytorch_lightning import LightningModule, LightningDataModule
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -16,8 +16,9 @@ from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from pytorch_lightning.utilities.seed import seed_everything
 
-from diffusers import UNet2DModel
-from diffusers import DDPMScheduler
+from generative.inferers import DiffusionInferer
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler
 
 import monai 
 from monai.data import Dataset, CacheDataset, DataLoader
@@ -230,82 +231,38 @@ class DDMMLightningModule(LightningModule):
         self.num_classes = 2
         self.timesteps = hparams.timesteps
 
-        self.noise2space = UNet2DModel(
-            sample_size=self.shape,
+        self.noise2space = DiffusionModelUNet(
+            spatial_dims=2,
             in_channels=1,
             out_channels=1,
-            layers_per_block=2,  # how many ResNet layers to use per UNet block
-            # (32, 48, 80, 224, 640),  # More channels -> more parameters
-            block_out_channels=(32, 48, 80, 224, 640), # type: ignore
-            norm_num_groups=8,
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "AttnDownBlock2D",
-                "AttnDownBlock2D",
-            ), # type: ignore
-            up_block_types=(
-                "AttnUpBlock2D",
-                "AttnUpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ), # type: ignore
-            class_embed_type="timestep",
+            num_channels=(64, 128, 256, 512),
+            attention_levels=(False, False, True, True),
+            num_res_blocks=1,
+            num_head_channels=256,
         )
         
-        self.image2label = UNet2DModel(
-            sample_size=self.shape,
+        self.image2label = DiffusionModelUNet(
+            spatial_dims=2,
             in_channels=1,
             out_channels=1,
-            layers_per_block=2,  # how many ResNet layers to use per UNet block
-            # (32, 48, 80, 224, 640),  # More channels -> more parameters
-            block_out_channels=(32, 48, 80, 224, 640),
-            norm_num_groups=8,
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "AttnDownBlock2D",
-                "AttnDownBlock2D",
-            ),  # type: ignore
-            up_block_types=(
-                "AttnUpBlock2D",
-                "AttnUpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ),  # type: ignore
-            class_embed_type="timestep",
+            num_channels=(64, 128, 256, 512),
+            attention_levels=(False, False, True, True),
+            num_res_blocks=1,
+            num_head_channels=256,
         )
         
-        self.label2image = UNet2DModel(
-            sample_size=self.shape,
+        self.label2image = DiffusionModelUNet(
+            spatial_dims=2,
             in_channels=1,
             out_channels=1,
-            layers_per_block=2,  # how many ResNet layers to use per UNet block
-            # (32, 48, 80, 224, 640),  # More channels -> more parameters
-            block_out_channels=(32, 48, 80, 224, 640), # type: ignore
-            norm_num_groups=8,
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "AttnDownBlock2D",
-                "AttnDownBlock2D",
-            ),  # type: ignore
-            up_block_types=(
-                "AttnUpBlock2D",
-                "AttnUpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ),  # type: ignore
-            class_embed_type="timestep",
+            num_channels=(64, 128, 256, 512),
+            attention_levels=(False, False, True, True),
+            num_res_blocks=1,
+            num_head_channels=256,
         )
 
-        self.scheduler = DDPMScheduler(num_train_timesteps=100)
+        self.scheduler = DDPMScheduler(num_train_timesteps=hparams.timesteps)
+        self.inferer = DiffusionInferer(self.scheduler)
         self.loss_func = nn.L1Loss()
         
     def _common_step(self, batch, batch_idx, optimizer_idx, stage: Optional[str]='common'): 
@@ -314,45 +271,44 @@ class DDMMLightningModule(LightningModule):
         batches = source.shape[0]
         # print(source.shape, target.shape, images.shape, labels.shape)
         
-        # Sample noise to add to the images
-        noise = torch.randn_like(source)
         # Sample a random timestep for each image
         timesteps = torch.randint(0, self.scheduler.num_train_timesteps, (batches,), device=_device).long() # type: ignore
-        
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_source = self.scheduler.add_noise(source * 2.0 - 1.0, noise, timesteps) # type: ignore
-        noisy_target = self.scheduler.add_noise(target * 2.0 - 1.0, noise, timesteps) # type: ignore
-        
+           
+        # Sample noise to add to the images
         class_source = torch.zeros(batches, device=_device)
         class_target = torch.ones(batches, device=_device)
         
-        loss = 0
-        # Predict the noise residual
-        noise_pred_source = self.noise2space.forward(noisy_source, timesteps, class_labels=class_source, return_dict=False)[0]
-        noise_pred_target = self.noise2space.forward(noisy_target, timesteps, class_labels=class_target, return_dict=False)[0]
-        loss += self.loss_func(noise, noise_pred_source)
-        loss += self.loss_func(noise, noise_pred_target)
+        noise = torch.randn_like(source)
+        noisy_source = self.scheduler.add_noise(original_samples=source, noise=noise, timesteps=timesteps)
+        noisy_target = self.scheduler.add_noise(original_samples=target, noise=noise, timesteps=timesteps)
+        super_loss = 0
+
+        # Get model prediction
+        noise_source_pred = self.noise2space.forward(noisy_source, timesteps=timesteps, class_labels=class_source)
+        noise_target_pred = self.noise2space.forward(noisy_target, timesteps=timesteps, class_labels=class_target)
         
+        super_loss += self.loss_func(noise, noise_source_pred)
+        super_loss += self.loss_func(noise, noise_target_pred)
+        
+        self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+
+        loss = super_loss
         if stage == 'train' and batch_idx % 10 == 0:
             with torch.no_grad():
-                smp_source = noise.clone()
-                smp_target = noise.clone()
-                for i, t in enumerate(self.scheduler.timesteps):
-                    # 1. predict noise model_output
-                    out_source = self.noise2space.forward(smp_source, t, class_source.long()).sample # type: ignore
-                    out_target = self.noise2space.forward(smp_target, t, class_target.long()).sample # type: ignore
-
+                sample_source = noise.clone()
+                sample_target = noise.clone()
+                for t in tqdm(range(self.num_timesteps)):
+                    output_source = self.noise2space.forward(sample_source, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_source)
+                    output_target = self.noise2space.forward(sample_target, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_target)
                     # 2. compute previous image: x_t -> x_t-1
-                    smp_source = self.scheduler.step(out_source, t, smp_source).prev_sample # type: ignore
-                    smp_target = self.scheduler.step(out_target, t, smp_target).prev_sample  # type: ignore
-
-                smp_source = smp_source * 0.5 + 0.5
-                smp_target = smp_target * 0.5 + 0.5
+                    sample_source, _ = self.scheduler.step(output_source, t, sample_source)   
+                    sample_target, _ = self.scheduler.step(output_target, t, sample_target)   
+                sample_source = sample_source * 0.5 + 0.5 # type: ignore
+                sample_target = sample_target * 0.5 + 0.5 # type: ignore
            
-            viz2d = torch.cat([source, target, smp_source, smp_target], dim=-1).transpose(2, 3)
+            viz2d = torch.cat([source, target, sample_source, sample_target], dim=-1).transpose(2, 3)
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
-            tensorboard = self.logger.experiment
+            tensorboard = self.logger.experiment # type: ignore
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)
             
         info = {f'loss': loss} 
