@@ -289,24 +289,60 @@ class DDMMLightningModule(LightningModule):
         
         super_loss += self.loss_func(noise, noise_source_pred)
         super_loss += self.loss_func(noise, noise_target_pred)
+       
+        # Implement end2end denoiser
+        class_prob = torch.rand(batches, device=_device)
+        class_prev = (class_prob * self.num_timesteps).int()
+        class_next = class_prev + 1
+        sample_prev = noise.clone()
+        sample_next = noise.clone()
+        # Implent visualization
+        sample_source = noise.clone()
+        sample_target = noise.clone()
+        
+        with torch.no_grad():
+            for t in tqdm(range(self.num_timesteps)):
+                output_source = self.noise2space.forward(sample_source, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_source)
+                output_target = self.noise2space.forward(sample_target, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_target)
+                sample_source, _ = self.scheduler.step(output_source, t, sample_source)   
+                sample_target, _ = self.scheduler.step(output_target, t, sample_target)   
+                
+                output_prev = self.noise2space.forward(sample_prev, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_prev)
+                output_next = self.noise2space.forward(sample_next, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_next)
+                sample_prev, _ = self.scheduler.step(output_prev, t, sample_prev)   
+                sample_next, _ = self.scheduler.step(output_next, t, sample_next)  
+        
+        unsup_loss = 0
+        # Get model prediction
+        sample_prev_pred = self.image2label.forward(sample_prev, timesteps=class_prev)
+        sample_next_pred = self.label2image.forward(sample_next, timesteps=class_next)
+        
+        unsup_loss += self.loss_func(sample_prev, sample_prev_pred)
+        unsup_loss += self.loss_func(sample_next, sample_next_pred)
         
         self.log(f'{stage}_super_loss', super_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
-
-        loss = super_loss
+        self.log(f'{stage}_unsup_loss', unsup_loss, on_step=(stage == 'train'), prog_bar=True, logger=True, sync_dist=True, batch_size=self.batch_size)
+        loss = super_loss + unsup_loss
+        
+        
+        sample_prev = sample_prev * 0.5 + 0.5 # type: ignore
+        sample_next = sample_next * 0.5 + 0.5 # type: ignore
+        sample_prev_pred = sample_prev_pred * 0.5 + 0.5 # type: ignore
+        sample_next_pred = sample_next_pred * 0.5 + 0.5 # type: ignore
+            
+        sample_source = sample_source * 0.5 + 0.5 # type: ignore
+        sample_target = sample_target * 0.5 + 0.5 # type: ignore
+        
         if stage == 'train' and batch_idx % 10 == 0:
-            with torch.no_grad():
-                sample_source = noise.clone()
-                sample_target = noise.clone()
-                for t in tqdm(range(self.num_timesteps)):
-                    output_source = self.noise2space.forward(sample_source, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_source)
-                    output_target = self.noise2space.forward(sample_target, timesteps=torch.Tensor((t,)).to(_device), class_labels=class_target)
-                    # 2. compute previous image: x_t -> x_t-1
-                    sample_source, _ = self.scheduler.step(output_source, t, sample_source)   
-                    sample_target, _ = self.scheduler.step(output_target, t, sample_target)   
-                sample_source = sample_source * 0.5 + 0.5 # type: ignore
-                sample_target = sample_target * 0.5 + 0.5 # type: ignore
-           
-            viz2d = torch.cat([source, target, sample_source, sample_target], dim=-1).transpose(2, 3)
+            # print(source, target, sample_source, sample_target)
+            viz2d = torch.Tensor(torch.cat([source, target, 
+                                            sample_source, 
+                                            sample_target, 
+                                            sample_prev, 
+                                            sample_next, 
+                                            sample_prev_pred, 
+                                            sample_next_pred
+                                            ], dim=-1).transpose(2, 3))
             grid = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=8, padding=0)
             tensorboard = self.logger.experiment # type: ignore
             tensorboard.add_image(f'{stage}_samples', grid.clamp(0., 1.), self.global_step // 10)
